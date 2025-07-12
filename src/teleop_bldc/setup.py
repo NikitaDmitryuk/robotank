@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'motor_controller = teleop_bldc.motor_controller_node:main',
         ],
     },
 )
