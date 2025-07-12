@@ -1,104 +1,83 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
-import OPi.GPIO as GPIO
+import subprocess
 
-# --- Настройки ---
-# Пины для управления двигателем 1 (левый)
-AIN1 = 7  # Вперед (PWM)
-AIN2 = 11 # Назад (PWM)
-
-# Пины для управления двигателем 2 (правый)
-BIN1 = 13 # Вперед (PWM)
-BIN2 = 15 # Назад (PWM)
-
-# Оси джойстика для управления
-# `axes[1]` - левый стик вверх/вниз
-# `axes[4]` - правый стик вверх/вниз (уточните для вашего джойстика)
-LEFT_MOTOR_AXIS = 1
-RIGHT_MOTOR_AXIS = 4
-
-DEADZONE = 0.1 # Порог чувствительности стиков
-
-class MotorControllerNode(Node):
+class MotorDriver(Node):
     def __init__(self):
-        super().__init__('motor_controller_node')
-        self.get_logger().info('Узел управления двигателями запущен.')
+        super().__init__('motor_driver')
+        # Инициализация PWM для моторов (примерные пины)
+        self.left_motor_forward = PWMControl(4)  # Левый мотор вперёд
+        self.left_motor_reverse = PWMControl(3)  # Левый мотор назад
+        self.right_motor_forward = PWMControl(21) # Правый мотор вперёд
+        self.right_motor_reverse = PWMControl(22) # Правый мотор назад
 
-        # Подписка на топик джойстика
+        # Подписка на данные джойстика
         self.subscription = self.create_subscription(
             Joy,
             'joy',
             self.joy_callback,
-            10)
-
-        # Настройка GPIO
-        GPIO.setmode(GPIO.BOARD)
-        # Настраиваем все пины как выходы
-        for pin in [AIN1, AIN2, BIN1, BIN2]:
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, GPIO.LOW)
-
-        # Настройка PWM (ШИМ) для каждого направления каждого мотора
-        # Частота 1000 Гц - хороший старт для BLDC
-        self.pwm_a1 = GPIO.PWM(AIN1, 1000)
-        self.pwm_a2 = GPIO.PWM(AIN2, 1000)
-        self.pwm_b1 = GPIO.PWM(BIN1, 1000)
-        self.pwm_b2 = GPIO.PWM(BIN2, 1000)
-
-        # Запускаем все PWM с нулевой мощностью (duty cycle = 0)
-        self.pwm_a1.start(0)
-        self.pwm_a2.start(0)
-        self.pwm_b1.start(0)
-        self.pwm_b2.start(0)
-
-        self.get_logger().info('GPIO и PWM инициализированы.')
+            10
+        )
 
     def joy_callback(self, msg):
-        # Получаем значения осей
-        left_stick_y = msg.axes[LEFT_MOTOR_AXIS]
-        right_stick_y = msg.axes[RIGHT_MOTOR_AXIS]
+        # Получение данных с джойстика
+        linear = msg.axes[1]  # Вперёд/назад (ось Y)
+        angular = msg.axes[0] # Поворот (ось X)
 
-        # Управление левым двигателем
-        self.control_motor(self.pwm_a1, self.pwm_a2, left_stick_y)
+        # Расчёт скоростей моторов
+        left_speed = linear - angular
+        right_speed = linear + angular
 
-        # Управление правым двигателем
-        self.control_motor(self.pwm_b1, self.pwm_b2, right_stick_y)
+        # Ограничение скоростей в диапазоне [-1, 1]
+        left_speed = max(min(left_speed, 1.0), -1.0)
+        right_speed = max(min(right_speed, 1.0), -1.0)
 
-    def control_motor(self, pwm_fwd, pwm_rev, speed):
-        # Преобразуем скорость (-1.0 до 1.0) в мощность ШИМ (0 до 100)
-        duty_cycle = abs(speed * 100)
+        print(f"left_speed: {left_speed}, right_speed: {right_speed}")
 
-        if speed > DEADZONE: # Движение вперед
-            pwm_rev.ChangeDutyCycle(0)
-            pwm_fwd.ChangeDutyCycle(duty_cycle)
-        elif speed < -DEADZONE: # Движение назад
-            pwm_fwd.ChangeDutyCycle(0)
-            pwm_rev.ChangeDutyCycle(duty_cycle)
-        else: # Остановка (в мертвой зоне)
-            pwm_fwd.ChangeDutyCycle(0)
-            pwm_rev.ChangeDutyCycle(0)
+        # Управление моторами
+        self.set_motor_speed(self.left_motor_forward, self.left_motor_reverse, left_speed)
+        self.set_motor_speed(self.right_motor_forward, self.right_motor_reverse, right_speed)
 
-    def cleanup(self):
-        self.get_logger().info('Остановка двигателей и очистка GPIO.')
-        self.pwm_a1.stop()
-        self.pwm_a2.stop()
-        self.pwm_b1.stop()
-        self.pwm_b2.stop()
-        GPIO.cleanup()
+    def set_motor_speed(self, forward_pwm, reverse_pwm, speed):
+        """Управление направлением и скоростью мотора"""
+        if speed > 0:
+            forward_pwm.set_duty(abs(speed))  # Вперёд
+            reverse_pwm.set_duty(0.0)
+        elif speed < 0:
+            forward_pwm.set_duty(0.0)
+            reverse_pwm.set_duty(abs(speed))  # Назад
+        else:
+            forward_pwm.set_duty(0.0)         # Остановка
+            reverse_pwm.set_duty(0.0)
 
+class PWMControl:
+    def __init__(self, wpi_pin):
+        self.wpi_pin = wpi_pin
+        self.arr = 2048  # Диапазон PWM
+        self._setup()
+
+    def _setup(self):
+        """Настройка PWM"""
+        subprocess.run(['gpio', 'mode', str(self.wpi_pin), 'pwm'])
+        subprocess.run(['gpio', 'pwmTone', str(self.wpi_pin), '20000'])  # Частота 20 кГц
+        subprocess.run(['gpio', 'pwmr', str(self.wpi_pin), str(self.arr)])
+        subprocess.run(['gpio', 'pwmc', str(self.wpi_pin), '1'])
+
+    def set_duty(self, duty):
+        """Установка коэффициента заполнения (0.0–1.0)"""
+        duty = max(0.0, min(1.0, duty))
+        ccr_value = int(duty * self.arr)
+        subprocess.run(['gpio', 'pwm', str(self.wpi_pin), str(ccr_value)])
 
 def main(args=None):
     rclpy.init(args=args)
-    motor_controller = MotorControllerNode()
-    try:
-        rclpy.spin(motor_controller)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        motor_controller.destroy_node()
-        motor_controller.cleanup()
-        rclpy.shutdown()
+    motor_driver = MotorDriver()
+    rclpy.spin(motor_driver)
+    motor_driver.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
